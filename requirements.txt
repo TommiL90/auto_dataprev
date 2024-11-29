@@ -3,4 +3,5 @@ python-dotenv==1.0.0
 pytesseract==0.3.10
 schedule==1.2.1
 undetected-chromedriver==3.5.4
+pystray
 Pillow==10.1.0
