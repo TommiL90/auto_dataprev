@@ -1,4 +1,4 @@
-from src.dataprev_client import DataprevClient
+from src.erp_client import ERPClient
 from dotenv import load_dotenv
 import os
 import sys
@@ -28,7 +28,7 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
-def test_dataprev_login():
+def test_erp_login():
     global client
 
     try:
@@ -36,7 +36,7 @@ def test_dataprev_login():
         load_dotenv()
 
         # Inicializar cliente
-        client = DataprevClient()
+        client = ERPClient()
 
         # Intentar login
         client.login()
@@ -60,4 +60,4 @@ def test_dataprev_login():
 if __name__ == "__main__":
     # Configurar el manejador de señales
     signal.signal(signal.SIGINT, signal_handler)
-    test_dataprev_login()
+    test_erp_login()

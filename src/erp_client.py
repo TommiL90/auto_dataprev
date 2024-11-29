@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
@@ -10,36 +11,77 @@ class ERPClient:
         self.url = os.getenv("ERP_URL")
         self.user = os.getenv("ERP_USER")
         self.password = os.getenv("ERP_PASSWORD")
+        self.playwright = None
         self.browser = None
+        self.context = None
         self.page = None
 
-    def login(self):
+    def _setup_browser(self) -> None:
+        """Configura el navegador con los parámetros correctos."""
+        try:
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(
+                headless=False,
+                channel="chrome",  # Usar Chrome instalado en el sistema
+                args=[
+                    "--start-maximized",
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
+            )
+            self.context = self.browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=(
+                    "Mozilla/5.0 "
+                    "(Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/119.0.0.0 "
+                    "Safari/537.36"
+                ),
+            )
+            self.page = self.context.new_page()
+
+            # Configurar timeouts más largos
+            self.page.set_default_timeout(60000)  # 60 segundos
+            self.page.set_default_navigation_timeout(60000)  # 60 segundos
+
+        except Exception as e:
+            logger.error(f"Error configurando el navegador: {str(e)}")
+            self.cleanup()
+            raise
+
+    def login(self) -> None:
         """Inicia sesión en el ERP."""
         try:
-            playwright = sync_playwright().start()
-            self.browser = playwright.chromium.launch(
-                headless=False,  # Cambiado a False para ver el navegador
-                args=['--start-maximized']
-            )
-            self.page = self.browser.new_page(viewport={'width': 1920, 'height': 1080})
+            if not self.browser:
+                self._setup_browser()
 
-            # Navegar a la página de login
+            # Navegar a la página inicial
             logger.info(f"Navegando a {self.url}")
-            self.page.goto(self.url)
+            self.page.goto(self.url, wait_until="networkidle")
 
-            # Llenar credenciales
+            # Esperar y llenar credenciales
             logger.info("Ingresando credenciales...")
-            self.page.fill("#username", self.user)
-            self.page.fill("#password", self.password)
+            username_input = self.page.wait_for_selector('//*[@id="P101_USERNAME"]')
+            time.sleep(1.5)  # Pausa para simular comportamiento humano
+            username_input.fill(self.user)
 
-            # Enviar formulario
+            password_input = self.page.wait_for_selector('//*[@id="P101_PASSWORD"]')
+            time.sleep(1)  # Pausa para simular comportamiento humano
+            password_input.fill(self.password)
+
+            # Click en el botón de login
             logger.info("Enviando formulario...")
-            self.page.click("#login-button")
+            time.sleep(1)  # Pausa para simular comportamiento humano
+            login_button = self.page.wait_for_selector('//*[@id="B224579857434482981"]')
+            login_button.click()
+            self.page.wait_for_load_state("networkidle")
 
-            # Esperar a que se complete el login
-            logger.info("Esperando redirección después del login...")
-            self.page.wait_for_selector(".dashboard", timeout=30000)
-            
+            # Verificar login exitoso
+            logger.info("Verificando login exitoso...")
+            self.page.wait_for_selector('//*[@id="224579043665482962"]/li[1]')
+
             if "login" in self.page.url:
                 raise Exception("Login fallido - Redirigido de vuelta a la página de login")
 
@@ -47,8 +89,6 @@ class ERPClient:
 
         except Exception as e:
             logger.error(f"Error en login de ERP: {str(e)}")
-            if self.browser:
-                self.browser.close()
             raise
 
     def get_beneficiaries(self):
@@ -122,7 +162,29 @@ class ERPClient:
         try:
             if self.page:
                 self.page.click("#logout-button")
-            if self.browser:
-                self.browser.close()
+            self.cleanup()
         except Exception as e:
             logger.error(f"Error en logout de ERP: {str(e)}")
+
+    def cleanup(self) -> None:
+        """Limpia los recursos de Playwright de manera segura."""
+        try:
+            if self.page and not self.page.is_closed():
+                self.page.close()
+            if self.context:
+                self.context.close()
+            if self.browser:
+                self.browser.close()
+            if self.playwright:
+                self.playwright.stop()
+        except Exception as e:
+            logger.error(f"Error durante la limpieza: {str(e)}")
+        finally:
+            self.page = None
+            self.context = None
+            self.browser = None
+            self.playwright = None
+
+    def __del__(self):
+        """Destructor para asegurar la limpieza de recursos."""
+        self.cleanup()
