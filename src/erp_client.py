@@ -15,25 +15,29 @@ class ERPClient:
         self.browser = None
         self.context = None
         self.page = None
+        self.processed_cpfs = set()
+        self.headless = False  # Agregar propiedad headless
 
     def _setup_browser(self) -> None:
         """Configura el navegador con los parámetros correctos."""
         try:
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(
-                headless=False,
+                headless=self.headless,
                 channel="chrome",  # Usar Chrome instalado en el sistema
                 args=[
-                    "--start-maximized",
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                 ],
             )
             self.context = self.browser.new_context(
-                viewport={"width": 1920, "height": 1080},
+                viewport={
+                    "width": 1366,
+                    "height": 768,
+                },  # Resolución estándar de laptop
                 user_agent=(
                     "Mozilla/5.0 "
-                    "(Macintosh; Intel Mac OS X 10_15_7) "
+                    "(Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 "
                     "(KHTML, like Gecko) "
                     "Chrome/119.0.0.0 "
@@ -64,16 +68,16 @@ class ERPClient:
             # Esperar y llenar credenciales
             logger.info("Ingresando credenciales...")
             username_input = self.page.wait_for_selector('//*[@id="P101_USERNAME"]')
-            time.sleep(1.5)  # Pausa para simular comportamiento humano
+            # time.sleep(1.5)  # Pausa para simular comportamiento humano
             username_input.fill(self.user)
 
             password_input = self.page.wait_for_selector('//*[@id="P101_PASSWORD"]')
-            time.sleep(1)  # Pausa para simular comportamiento humano
+            # time.sleep(1)  # Pausa para simular comportamiento humano
             password_input.fill(self.password)
 
             # Click en el botón de login
             logger.info("Enviando formulario...")
-            time.sleep(1)  # Pausa para simular comportamiento humano
+            # time.sleep(1)  # Pausa para simular comportamiento humano
             login_button = self.page.wait_for_selector('//*[@id="B224579857434482981"]')
             login_button.click()
             self.page.wait_for_load_state("networkidle")
@@ -83,7 +87,9 @@ class ERPClient:
             self.page.wait_for_selector('//*[@id="224579043665482962"]/li[1]')
 
             if "login" in self.page.url:
-                raise Exception("Login fallido - Redirigido de vuelta a la página de login")
+                raise Exception(
+                    "Login fallido - Redirigido de vuelta a la página de login"
+                )
 
             logger.info("Login exitoso en ERP")
 
@@ -92,69 +98,205 @@ class ERPClient:
             raise
 
     def get_beneficiaries(self):
-        """Obtiene la lista de beneficiarios del ERP."""
+        """Obtiene la lista de beneficiarios del día."""
         try:
-            # Navegar a la sección de beneficiarios
-            self.page.click("text=CRM")
-            self.page.click("text=Dataprev")
-            self.page.click("text=Beneficiarios DataPrev")
+            # Navegar al menú de beneficiarios
+            logger.info("Navegando al menú de beneficiarios...")
 
-            # Esperar a que cargue la tabla
-            self.page.wait_for_selector(".beneficiarios-table")
+            self.page.click('//*[@id="t_MenuNav_0"]')
+            logger.info("1")
+            time.sleep(5)
+            logger.info("2")
 
-            # Obtener datos de beneficiarios
-            beneficiaries = []
-            rows = self.page.query_selector_all(".beneficiario-row")
+            # Esperar que todos los estados de carga se completen
+            logger.info("Esperando carga completa de la página...")
+            self.page.wait_for_load_state("networkidle", timeout=30000)
+            self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+            self.page.wait_for_load_state("load", timeout=30000)
 
-            for row in rows:
-                # Hacer clic en editar para abrir el modal
-                row.query_selector(".edit-button").click()
-                self.page.wait_for_selector(".modal-content")
+            # Esperar que no haya solicitudes de red pendientes
+            time.sleep(2)
+            self.page.wait_for_load_state("networkidle", timeout=30000)
 
-                # Extraer información del modal
-                beneficiary = {
-                    "cpf": self.page.query_selector("#cpf").input_value(),
-                    "nome": self.page.query_selector("#nome").input_value(),
-                    # ... extraer otros campos necesarios
+            # Verificar que el DOM esté estable
+            self.page.evaluate(
+                """() => {
+                return new Promise((resolve) => {
+                    const observer = new MutationObserver((mutations, obs) => {
+                        obs.disconnect();
+                        resolve(true);
+                    });
+
+                    observer.observe(document.body, {
+                        childList: true,
+                        subtree: true,
+                        attributes: true,
+                        characterData: true
+                    });
+
+                    // Si no hay cambios en 5 segundos, consideramos que el DOM está estable
+                    setTimeout(() => {
+                        observer.disconnect();
+                        resolve(true);
+                    }, 5000);
+                });
+            }"""
+            )
+
+            logger.info("2.1")
+
+            logger.info("Haciendo click en el botón de navegación...")
+
+            # Esperar a que el botón esté presente en el DOM
+            button = self.page.locator('#t_Button_navControl')
+            
+            try:
+                # Esperar a que el botón esté adjunto al DOM
+                button.wait_for(state="attached", timeout=5000)
+                logger.info("Botón encontrado en el DOM")
+                
+                # Click directo
+                button.click(force=True, timeout=5000)
+                logger.info("Click realizado")
+                
+                # Esperar a que el botón cambie de estado
+                self.page.wait_for_selector('#t_Button_navControl[aria-expanded="true"]', timeout=5000)
+                logger.info("Botón expandido correctamente")
+                
+            except Exception as e:
+                logger.error(f"Error al interactuar con el botón: {str(e)}")
+                self.page.screenshot(path="debug_nav_button_error.png")
+                raise Exception("No se pudo activar el botón de navegación")
+
+            # Ahora esperar a que el TreeView esté visible
+            logger.info("Esperando que aparezca el TreeView...")
+            try:
+                self.page.wait_for_selector(
+                    'div.a-TreeView#t_TreeNav[aria-hidden="false"]',
+                    state="visible",
+                    timeout=5000,
+                )
+                logger.info("TreeView encontrado y visible")
+            except Exception as e:
+                logger.error(f"TreeView no apareció o no está visible: {str(e)}")
+                self.page.screenshot(path="debug_treeview.png")
+                raise Exception("TreeView no apareció después del click")
+
+            # Esperar un momento para que el DOM se estabilice
+            time.sleep(2)
+
+            # Click en el nodo Dataprev usando JavaScript
+            logger.info("Haciendo click en el nodo Dataprev...")
+            dataprev_clicked = self.page.evaluate(
+                """() => {
+                const node = document.getElementById('t_TreeNav_1');
+                if (node) {
+                    const toggle = node.querySelector('.a-TreeView-toggle');
+                    if (toggle) {
+                        toggle.click();
+                        return true;
+                    }
                 }
+                return false;
+            }"""
+            )
 
-                beneficiaries.append(beneficiary)
+            if not dataprev_clicked:
+                logger.error("No se pudo hacer click en el nodo Dataprev")
+                self.page.screenshot(path="debug_dataprev.png")
+                raise Exception("No se pudo expandir el nodo Dataprev")
 
-                # Cerrar modal
-                self.page.click(".close-modal")
+            # Esperar a que el menú se expanda
+            time.sleep(2)
 
+            data_prev_button = self.page.wait_for_selector('//*[@id="t_TreeNav_1"]')
+            logger.info("6")
+            if not data_prev_button:
+                # self.page.click('//*[@id="t_Button_navControl"]')
+                time.sleep(1)
+                data_prev_button = self.page.wait_for_selector('//*[@id="t_TreeNav_1"]')
+            logger.info("7")
+            data_prev_button.click()
+            self.page.wait_for_load_state("networkidle")
+            logger.info("8")
+            time.sleep(5)
+            # Pausa para simular comportamiento humano
+            self.page.click('//*[@id="t_TreeNav_1"]')
+            logger.info("4")
+            time.sleep(1)
+            self.page.click('//*[@id="t_TreeNav_2"]')
+            self.page.wait_for_load_state("networkidle")
+
+            # Esperar a que la tabla cargue
+            logger.info("Esperando que la tabla cargue...")
+            table = self.page.wait_for_selector(
+                '//*[@id="36052098998664950_orig"]/tbody'
+            )
+
+            # Obtener todas las filas
+            rows = table.query_selector_all("tr")
+            beneficiaries = []
+            today = time.strftime("%d/%m/%Y")
+
+            logger.info(f"Procesando {len(rows)} filas de la tabla...")
+            for row in rows:
+                date_cell = row.query_selector("td:nth-child(9)")
+                if not date_cell:
+                    continue
+
+                date_text = date_cell.inner_text().strip()
+
+                if date_text == today:
+                    cpf_cell = row.query_selector("td:nth-child(5)")
+                    if not cpf_cell:
+                        continue
+
+                    cpf = cpf_cell.inner_text().strip()
+
+                    if cpf not in self.processed_cpfs:
+                        dialog_button = row.query_selector("td:nth-child(1) button")
+                        if not dialog_button:
+                            continue
+
+                        dialog_id = dialog_button.get_attribute("id")
+                        beneficiaries.append({"cpf": cpf, "dialog_id": dialog_id})
+
+            logger.info(
+                f"Encontrados {len(beneficiaries)} beneficiarios nuevos para hoy"
+            )
             return beneficiaries
 
         except Exception as e:
             logger.error(f"Error obteniendo beneficiarios: {str(e)}")
             raise
 
-    def update_beneficiary(self, cpf, status, dataprev_link=None):
-        """Actualiza el estado de un beneficiario en el ERP."""
+    def process_beneficiary_details(self, beneficiary):
+        """Procesa los detalles de un beneficiario específico."""
         try:
-            # Buscar beneficiario
-            self.page.fill("#search-cpf", cpf)
-            self.page.click("#search-button")
+            logger.info(f"Procesando detalles para CPF: {beneficiary['cpf']}")
 
-            # Abrir modal de edición
-            self.page.click(".edit-button")
-            self.page.wait_for_selector(".modal-content")
+            # Click en el botón de diálogo
+            self.page.click(f'#{beneficiary["dialog_id"]}')
+            self.page.wait_for_selector(".modal-dialog")
+            time.sleep(1)  # Esperar a que el diálogo se abra completamente
 
-            # Actualizar estado
-            self.page.select_option("#status", status)
+            # Obtener el número de beneficio
+            benefit_number = self.page.inner_text(
+                '//*[@id="P73_NUMERO_BENEFICIO_DISPLAY"]'
+            ).strip()
 
-            # Si hay enlace, actualizarlo
-            if dataprev_link:
-                self.page.fill("#dataprev-link", dataprev_link)
+            # Cerrar el diálogo
+            self.page.click(".modal-dialog .close")
+            time.sleep(0.5)  # Esperar a que el diálogo se cierre
 
-            # Guardar cambios
-            self.page.click("#save-button")
-            self.page.wait_for_selector(".success-message")
+            # Marcar el CPF como procesado
+            self.processed_cpfs.add(beneficiary["cpf"])
 
-            logger.info(f"Beneficiario {cpf} actualizado con éxito")
+            logger.info(f"Beneficio encontrado: {benefit_number}")
+            return {"cpf": beneficiary["cpf"], "benefit_number": benefit_number}
 
         except Exception as e:
-            logger.error(f"Error actualizando beneficiario {cpf}: {str(e)}")
+            logger.error(f"Error procesando detalles del beneficiario: {str(e)}")
             raise
 
     def logout(self):
